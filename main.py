@@ -7,6 +7,37 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ConversationHandler, \
     filters, ContextTypes
 
+
+# Функция форматирования денежных сумм
+def format_money(amount):
+    """
+    Форматирует денежную сумму из 1234.56 в формат 1'234,56
+    """
+    # Округляем до 2 знаков после запятой
+    rounded_amount = round(amount, 2)
+    
+    # Преобразуем в строку и проверяем, есть ли десятичная точка
+    amount_str = str(rounded_amount)
+    if '.' in amount_str:
+        int_part, dec_part = amount_str.split('.')
+    else:
+        # Если точки нет, значит число целое
+        int_part = amount_str
+        dec_part = '0'
+    
+    # Форматируем целую часть с разделителями тысяч (апострофами)
+    formatted_int = ''
+    for i, digit in enumerate(reversed(int_part)):
+        if i > 0 and i % 3 == 0:
+            formatted_int = "'" + formatted_int
+        formatted_int = digit + formatted_int
+    
+    # Убеждаемся, что дробная часть имеет 2 знака
+    dec_part = dec_part.ljust(2, '0')
+    
+    # Соединяем части с запятой в качестве десятичного разделителя
+    return f"{formatted_int},{dec_part}"
+
 # Загружаем переменные окружения из файла .env
 load_dotenv()
 
@@ -145,9 +176,9 @@ async def list_categories(update: Update, context: ContextTypes.DEFAULT_TYPE):
         remaining = limit_amount - spent_amount
 
         if remaining >= 0:
-            result += f"✅ {cat_name}: осталось {remaining:.2f} из {limit_amount:.2f}\n"
+            result += f"✅ {cat_name}: осталось {format_money(remaining)} из {format_money(limit_amount)}\n"
         else:
-            result += f"❌ {cat_name}: перерасход {abs(remaining):.2f} (лимит {limit_amount:.2f})\n"
+            result += f"❌ {cat_name}: перерасход {format_money(abs(remaining))} (лимит {format_money(limit_amount)})\n"
 
     conn.close()
     await query.edit_message_text(result)
@@ -382,7 +413,7 @@ async def set_limit_category(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     await query.edit_message_text(
         f"Категория: {cat_name}\n"
-        f"Текущий лимит на {current_month}/{current_year}: {current_limit}\n\n"
+        f"Текущий лимит на {current_month}/{current_year}: {format_money(current_limit)}\n\n"
         "Введите новый лимит расходов для этой категории:"
     )
     return SET_LIMIT
@@ -419,7 +450,7 @@ async def set_limit_finish(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         f"Лимит для категории '{cat_name}' на {current_month}/{current_year} "
-        f"установлен: {limit_amount:.2f}"
+        f"установлен: {format_money(limit_amount)}"
     )
 
     return ConversationHandler.END
@@ -516,14 +547,14 @@ async def add_expense_finish(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if remaining >= 0:
         message = (
             f"✅ Расход записан. Категория '{cat_name}'\n"
-            f"Потрачено: {expense_amount:.2f}\n"
-            f"Осталось до лимита: {remaining:.2f}"
+            f"Потрачено: {format_money(expense_amount)}\n"
+            f"Осталось до лимита: {format_money(remaining)}"
         )
     else:
         message = (
             f"❌ Расход записан. Категория '{cat_name}'\n"
-            f"Потрачено: {expense_amount:.2f}\n"
-            f"Внимание! Перерасход: {abs(remaining):.2f}"
+            f"Потрачено: {format_money(expense_amount)}\n"
+            f"Внимание! Перерасход: {format_money(abs(remaining))}"
         )
 
     await update.message.reply_text(message)
@@ -581,8 +612,8 @@ async def show_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
             status = "⚠️"
 
         report += f"{status} {cat_name}:\n"
-        report += f"   Лимит: {limit_amount:.2f}\n"
-        report += f"   Потрачено: {spent_amount:.2f} ({usage_percent:.1f}%)\n\n"
+        report += f"   Лимит: {format_money(limit_amount)}\n"
+        report += f"   Потрачено: {format_money(spent_amount)} ({usage_percent:.1f}%)\n\n"
 
     # Общая статистика
     if total_limit > 0:
@@ -593,8 +624,8 @@ async def show_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
         total_status = "⚠️"
 
     report += f"ИТОГО {total_status}:\n"
-    report += f"Общий лимит: {total_limit:.2f}\n"
-    report += f"Общие расходы: {total_spent:.2f} ({total_percent:.1f}%)"
+    report += f"Общий лимит: {format_money(total_limit)}\n"
+    report += f"Общие расходы: {format_money(total_spent)} ({total_percent:.1f}%)"
 
     conn.close()
     await update.message.reply_text(report)
