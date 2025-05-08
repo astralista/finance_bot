@@ -153,6 +153,8 @@ async def list_categories(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cursor = conn.cursor()
 
     result = "📋 Список категорий и остаток лимита:\n\n"
+    total_limit = 0
+    total_spent = 0
 
     for cat_id, cat_name in categories:
         # Получаем лимит для текущего месяца
@@ -162,6 +164,7 @@ async def list_categories(update: Update, context: ContextTypes.DEFAULT_TYPE):
         """, (cat_id, current_month, current_year))
         limit_data = cursor.fetchone()
         limit_amount = limit_data[0] if limit_data else 0
+        total_limit += limit_amount
 
         # Получаем сумму расходов по категории за текущий месяц
         cursor.execute("""
@@ -171,6 +174,7 @@ async def list_categories(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         spent_data = cursor.fetchone()
         spent_amount = spent_data[0] if spent_data[0] else 0
+        total_spent += spent_amount
 
         # Вычисляем остаток
         remaining = limit_amount - spent_amount
@@ -179,6 +183,24 @@ async def list_categories(update: Update, context: ContextTypes.DEFAULT_TYPE):
             result += f"✅ {cat_name}: осталось {format_money(remaining)} из {format_money(limit_amount)}\n"
         else:
             result += f"❌ {cat_name}: перерасход {format_money(abs(remaining))} (лимит {format_money(limit_amount)})\n"
+
+    # Общая статистика
+    if total_limit > 0:
+        total_percent = (total_spent / total_limit) * 100
+        total_status = "✅" if total_spent <= total_limit else "❌"
+    else:
+        total_percent = 0
+        total_status = "⚠️"
+    
+    # Вычисляем остаток средств
+    remaining_funds = total_limit - total_spent
+    remaining_percent = (remaining_funds / total_limit) * 100 if total_limit > 0 else 0
+
+    # Добавляем итоговую информацию
+    result += f"\nИТОГО {total_status}:\n"
+    result += f"Общий лимит: {format_money(total_limit)}\n"
+    result += f"Общие расходы: {format_money(total_spent)} ({total_percent:.1f}%)\n"
+    result += f"Остаток средств: {format_money(remaining_funds)} ({remaining_percent:.1f}%)"
 
     conn.close()
     await query.edit_message_text(result)
