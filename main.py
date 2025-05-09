@@ -65,8 +65,10 @@ def init_db():
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS categories (
         id INTEGER PRIMARY KEY,
-        name TEXT UNIQUE,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        name TEXT,
+        user_id INTEGER,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(name, user_id)
     )
     ''')
 
@@ -75,12 +77,13 @@ def init_db():
     CREATE TABLE IF NOT EXISTS limits (
         id INTEGER PRIMARY KEY,
         category_id INTEGER,
+        user_id INTEGER,
         amount REAL,
         month INTEGER,
         year INTEGER,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (category_id) REFERENCES categories (id),
-        UNIQUE(category_id, month, year)
+        UNIQUE(category_id, month, year, user_id)
     )
     ''')
 
@@ -89,6 +92,7 @@ def init_db():
     CREATE TABLE IF NOT EXISTS expenses (
         id INTEGER PRIMARY KEY,
         category_id INTEGER,
+        user_id INTEGER,
         amount REAL,
         date DATE,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -96,8 +100,80 @@ def init_db():
     )
     ''')
 
+    # Проверяем, нужно ли мигрировать данные
+    migrate_db(cursor)
+
     conn.commit()
     conn.close()
+
+# Миграция базы данных для добавления user_id
+def migrate_db(cursor):
+    # Проверяем, есть ли колонка user_id в таблице expenses
+    cursor.execute("PRAGMA table_info(expenses)")
+    columns = [column[1] for column in cursor.fetchall()]
+    
+    # Если колонки user_id нет в таблице expenses, добавляем её
+    if 'user_id' not in columns:
+        # Получаем первого пользователя из истории сообщений или используем дефолтный ID
+        default_user_id = 0  # Значение по умолчанию для существующих записей
+        
+        # Создаем временные таблицы и переносим данные
+        # Для таблицы categories
+        cursor.execute('''
+        CREATE TABLE categories_new (
+            id INTEGER PRIMARY KEY,
+            name TEXT,
+            user_id INTEGER,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(name, user_id)
+        )
+        ''')
+        cursor.execute(f'''
+        INSERT INTO categories_new (id, name, user_id, created_at)
+        SELECT id, name, {default_user_id}, created_at FROM categories
+        ''')
+        cursor.execute("DROP TABLE categories")
+        cursor.execute("ALTER TABLE categories_new RENAME TO categories")
+        
+        # Для таблицы limits
+        cursor.execute('''
+        CREATE TABLE limits_new (
+            id INTEGER PRIMARY KEY,
+            category_id INTEGER,
+            user_id INTEGER,
+            amount REAL,
+            month INTEGER,
+            year INTEGER,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (category_id) REFERENCES categories (id),
+            UNIQUE(category_id, month, year, user_id)
+        )
+        ''')
+        cursor.execute(f'''
+        INSERT INTO limits_new (id, category_id, user_id, amount, month, year, created_at)
+        SELECT id, category_id, {default_user_id}, amount, month, year, created_at FROM limits
+        ''')
+        cursor.execute("DROP TABLE limits")
+        cursor.execute("ALTER TABLE limits_new RENAME TO limits")
+        
+        # Для таблицы expenses
+        cursor.execute('''
+        CREATE TABLE expenses_new (
+            id INTEGER PRIMARY KEY,
+            category_id INTEGER,
+            user_id INTEGER,
+            amount REAL,
+            date DATE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (category_id) REFERENCES categories (id)
+        )
+        ''')
+        cursor.execute(f'''
+        INSERT INTO expenses_new (id, category_id, user_id, amount, date, created_at)
+        SELECT id, category_id, {default_user_id}, amount, date, created_at FROM expenses
+        ''')
+        cursor.execute("DROP TABLE expenses")
+        cursor.execute("ALTER TABLE expenses_new RENAME TO expenses")
 
 
 # Команда /start
@@ -125,11 +201,19 @@ async def categories_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text('Выберите действие:', reply_markup=reply_markup)
 
 
+# Получить user_id из объекта Update
+def get_user_id(update: Update):
+    if update.message:
+        return update.message.from_user.id
+    elif update.callback_query:
+        return update.callback_query.from_user.id
+    return None
+
 # Получить список категорий из БД
-def get_categories():
+def get_categories(user_id):
     conn = sqlite3.connect('expenses.db')
     cursor = conn.cursor()
-    cursor.execute("SELECT id, name FROM categories ORDER BY name")
+    cursor.execute("SELECT id, name FROM categories WHERE user_id = ? ORDER BY name", (user_id,))
     categories = cursor.fetchall()
     conn.close()
     return categories
@@ -139,8 +223,9 @@ def get_categories():
 async def list_categories(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-
-    categories = get_categories()
+    
+    user_id = get_user_id(update)
+    categories = get_categories(user_id)
 
     if not categories:
         await query.edit_message_text("У вас еще нет категорий. Создайте их с помощью команды 'Добавить категорию'.")
@@ -160,8 +245,8 @@ async def list_categories(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Получаем лимит для текущего месяца
         cursor.execute("""
             SELECT amount FROM limits 
-            WHERE category_id = ? AND month = ? AND year = ?
-        """, (cat_id, current_month, current_year))
+            WHERE category_id = ? AND month = ? AND year = ? AND user_id = ?
+        """, (cat_id, current_month, current_year, user_id))
         limit_data = cursor.fetchone()
         limit_amount = limit_data[0] if limit_data else 0
         total_limit += limit_amount
@@ -169,8 +254,8 @@ async def list_categories(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Получаем сумму расходов по категории за текущий месяц
         cursor.execute("""
             SELECT SUM(amount) FROM expenses 
-            WHERE category_id = ? AND strftime('%m', date) = ? AND strftime('%Y', date) = ?
-        """, (cat_id, f"{current_month:02d}", str(current_year)))
+            WHERE category_id = ? AND strftime('%m', date) = ? AND strftime('%Y', date) = ? AND user_id = ?
+        """, (cat_id, f"{current_month:02d}", str(current_year), user_id))
 
         spent_data = cursor.fetchone()
         spent_amount = spent_data[0] if spent_data[0] else 0
@@ -218,6 +303,7 @@ async def add_category_start(update: Update, context: ContextTypes.DEFAULT_TYPE)
 # Завершение добавления категории
 async def add_category_finish(update: Update, context: ContextTypes.DEFAULT_TYPE):
     category_name = update.message.text.strip()
+    user_id = get_user_id(update)
 
     if not category_name:
         await update.message.reply_text("Название категории не может быть пустым. Попробуйте снова.")
@@ -227,7 +313,7 @@ async def add_category_finish(update: Update, context: ContextTypes.DEFAULT_TYPE
     cursor = conn.cursor()
 
     try:
-        cursor.execute("INSERT INTO categories (name) VALUES (?)", (category_name,))
+        cursor.execute("INSERT INTO categories (name, user_id) VALUES (?, ?)", (category_name, user_id))
         conn.commit()
         await update.message.reply_text(f"Категория '{category_name}' успешно добавлена!")
     except sqlite3.IntegrityError:
@@ -242,8 +328,9 @@ async def add_category_finish(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def edit_category_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-
-    categories = get_categories()
+    
+    user_id = get_user_id(update)
+    categories = get_categories(user_id)
 
     if not categories:
         await query.edit_message_text("У вас еще нет категорий для редактирования.")
@@ -265,11 +352,22 @@ async def edit_category_select(update: Update, context: ContextTypes.DEFAULT_TYP
 
     cat_id = query.data.split('_')[1]
     context.user_data['edit_category_id'] = cat_id
+    
+    user_id = get_user_id(update)
+    context.user_data['user_id'] = user_id
 
     conn = sqlite3.connect('expenses.db')
     cursor = conn.cursor()
-    cursor.execute("SELECT name FROM categories WHERE id = ?", (cat_id,))
-    cat_name = cursor.fetchone()[0]
+    cursor.execute("SELECT name FROM categories WHERE id = ? AND user_id = ?", (cat_id, user_id))
+    cat_name_data = cursor.fetchone()
+    
+    if not cat_name_data:
+        await query.edit_message_text("Категория не найдена или у вас нет доступа к ней.")
+        conn.close()
+        return ConversationHandler.END
+        
+    cat_name = cat_name_data[0]
+    context.user_data['edit_category_name'] = cat_name
     conn.close()
 
     await query.edit_message_text(f"Текущее название: {cat_name}\nВведите новое название категории:")
@@ -280,6 +378,7 @@ async def edit_category_select(update: Update, context: ContextTypes.DEFAULT_TYP
 async def edit_category_finish(update: Update, context: ContextTypes.DEFAULT_TYPE):
     new_name = update.message.text.strip()
     cat_id = context.user_data.get('edit_category_id')
+    user_id = context.user_data.get('user_id', get_user_id(update))
 
     if not new_name:
         await update.message.reply_text("Название категории не может быть пустым. Попробуйте снова.")
@@ -289,7 +388,15 @@ async def edit_category_finish(update: Update, context: ContextTypes.DEFAULT_TYP
     cursor = conn.cursor()
 
     try:
-        cursor.execute("UPDATE categories SET name = ? WHERE id = ?", (new_name, cat_id))
+        # Проверяем, что категория принадлежит пользователю
+        cursor.execute("SELECT id FROM categories WHERE id = ? AND user_id = ?", (cat_id, user_id))
+        if not cursor.fetchone():
+            await update.message.reply_text("У вас нет доступа к этой категории.")
+            conn.close()
+            return ConversationHandler.END
+            
+        # Обновляем название категории
+        cursor.execute("UPDATE categories SET name = ? WHERE id = ? AND user_id = ?", (new_name, cat_id, user_id))
         conn.commit()
         await update.message.reply_text(f"Название категории успешно изменено на '{new_name}'!")
     except sqlite3.IntegrityError:
@@ -304,8 +411,9 @@ async def edit_category_finish(update: Update, context: ContextTypes.DEFAULT_TYP
 async def delete_category_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-
-    categories = get_categories()
+    
+    user_id = get_user_id(update)
+    categories = get_categories(user_id)
 
     if not categories:
         await query.edit_message_text("У вас еще нет категорий для удаления.")
@@ -326,11 +434,20 @@ async def delete_category_confirm(update: Update, context: ContextTypes.DEFAULT_
     await query.answer()
 
     cat_id = query.data.split('_')[1]
+    user_id = get_user_id(update)
+    context.user_data['user_id'] = user_id
 
     conn = sqlite3.connect('expenses.db')
     cursor = conn.cursor()
-    cursor.execute("SELECT name FROM categories WHERE id = ?", (cat_id,))
-    cat_name = cursor.fetchone()[0]
+    cursor.execute("SELECT name FROM categories WHERE id = ? AND user_id = ?", (cat_id, user_id))
+    cat_name_data = cursor.fetchone()
+    
+    if not cat_name_data:
+        await query.edit_message_text("Категория не найдена или у вас нет доступа к ней.")
+        conn.close()
+        return ConversationHandler.END
+        
+    cat_name = cat_name_data[0]
     conn.close()
 
     context.user_data['delete_category_id'] = cat_id
@@ -358,14 +475,22 @@ async def delete_category_finish(update: Update, context: ContextTypes.DEFAULT_T
     if query.data.startswith('confirm_delete_'):
         cat_id = context.user_data.get('delete_category_id')
         cat_name = context.user_data.get('delete_category_name')
+        user_id = context.user_data.get('user_id', get_user_id(update))
 
         conn = sqlite3.connect('expenses.db')
         cursor = conn.cursor()
 
+        # Проверяем, что категория принадлежит пользователю
+        cursor.execute("SELECT id FROM categories WHERE id = ? AND user_id = ?", (cat_id, user_id))
+        if not cursor.fetchone():
+            await query.edit_message_text("У вас нет доступа к этой категории.")
+            conn.close()
+            return ConversationHandler.END
+
         # Удаляем все связанные записи
-        cursor.execute("DELETE FROM expenses WHERE category_id = ?", (cat_id,))
-        cursor.execute("DELETE FROM limits WHERE category_id = ?", (cat_id,))
-        cursor.execute("DELETE FROM categories WHERE id = ?", (cat_id,))
+        cursor.execute("DELETE FROM expenses WHERE category_id = ? AND user_id = ?", (cat_id, user_id))
+        cursor.execute("DELETE FROM limits WHERE category_id = ? AND user_id = ?", (cat_id, user_id))
+        cursor.execute("DELETE FROM categories WHERE id = ? AND user_id = ?", (cat_id, user_id))
 
         conn.commit()
         conn.close()
@@ -391,8 +516,9 @@ async def limits_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def set_limit_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-
-    categories = get_categories()
+    
+    user_id = get_user_id(update)
+    categories = get_categories(user_id)
 
     if not categories:
         await query.edit_message_text("У вас еще нет категорий. Создайте их сначала.")
@@ -414,11 +540,21 @@ async def set_limit_category(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     cat_id = query.data.split('_')[1]
     context.user_data['limit_category_id'] = cat_id
+    
+    user_id = get_user_id(update)
+    context.user_data['user_id'] = user_id
 
     conn = sqlite3.connect('expenses.db')
     cursor = conn.cursor()
-    cursor.execute("SELECT name FROM categories WHERE id = ?", (cat_id,))
-    cat_name = cursor.fetchone()[0]
+    cursor.execute("SELECT name FROM categories WHERE id = ? AND user_id = ?", (cat_id, user_id))
+    cat_name_data = cursor.fetchone()
+    
+    if not cat_name_data:
+        await query.edit_message_text("Категория не найдена или у вас нет доступа к ней.")
+        conn.close()
+        return ConversationHandler.END
+        
+    cat_name = cat_name_data[0]
     context.user_data['limit_category_name'] = cat_name
 
     current_month = datetime.now().month
@@ -426,8 +562,8 @@ async def set_limit_category(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     cursor.execute("""
         SELECT amount FROM limits 
-        WHERE category_id = ? AND month = ? AND year = ?
-    """, (cat_id, current_month, current_year))
+        WHERE category_id = ? AND month = ? AND year = ? AND user_id = ?
+    """, (cat_id, current_month, current_year, user_id))
 
     limit_data = cursor.fetchone()
     current_limit = limit_data[0] if limit_data else 0
@@ -455,6 +591,7 @@ async def set_limit_finish(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     cat_id = context.user_data.get('limit_category_id')
     cat_name = context.user_data.get('limit_category_name')
+    user_id = context.user_data.get('user_id', get_user_id(update))
     current_month = datetime.now().month
     current_year = datetime.now().year
 
@@ -463,9 +600,9 @@ async def set_limit_finish(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Пробуем обновить существующий лимит или создать новый
     cursor.execute("""
-        INSERT OR REPLACE INTO limits (category_id, amount, month, year)
-        VALUES (?, ?, ?, ?)
-    """, (cat_id, limit_amount, current_month, current_year))
+        INSERT OR REPLACE INTO limits (category_id, amount, month, year, user_id)
+        VALUES (?, ?, ?, ?, ?)
+    """, (cat_id, limit_amount, current_month, current_year, user_id))
 
     conn.commit()
     conn.close()
@@ -480,7 +617,8 @@ async def set_limit_finish(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # Начало добавления расхода
 async def add_expense_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    categories = get_categories()
+    user_id = get_user_id(update)
+    categories = get_categories(user_id)
 
     if not categories:
         await update.message.reply_text("У вас еще нет категорий. Создайте их сначала с помощью /categories.")
@@ -502,11 +640,21 @@ async def add_expense_category(update: Update, context: ContextTypes.DEFAULT_TYP
 
     cat_id = query.data.split('_')[1]
     context.user_data['expense_category_id'] = cat_id
+    
+    user_id = get_user_id(update)
+    context.user_data['user_id'] = user_id
 
     conn = sqlite3.connect('expenses.db')
     cursor = conn.cursor()
-    cursor.execute("SELECT name FROM categories WHERE id = ?", (cat_id,))
-    cat_name = cursor.fetchone()[0]
+    cursor.execute("SELECT name FROM categories WHERE id = ? AND user_id = ?", (cat_id, user_id))
+    cat_name_data = cursor.fetchone()
+    
+    if not cat_name_data:
+        await query.edit_message_text("Категория не найдена или у вас нет доступа к ней.")
+        conn.close()
+        return ConversationHandler.END
+        
+    cat_name = cat_name_data[0]
     context.user_data['expense_category_name'] = cat_name
     conn.close()
 
@@ -528,6 +676,7 @@ async def add_expense_finish(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     cat_id = context.user_data.get('expense_category_id')
     cat_name = context.user_data.get('expense_category_name')
+    user_id = context.user_data.get('user_id', get_user_id(update))
     today = datetime.now().date().isoformat()
 
     conn = sqlite3.connect('expenses.db')
@@ -535,9 +684,9 @@ async def add_expense_finish(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     # Добавляем расход
     cursor.execute("""
-        INSERT INTO expenses (category_id, amount, date)
-        VALUES (?, ?, ?)
-    """, (cat_id, expense_amount, today))
+        INSERT INTO expenses (category_id, amount, date, user_id)
+        VALUES (?, ?, ?, ?)
+    """, (cat_id, expense_amount, today, user_id))
 
     # Получаем текущий лимит и расходы
     current_month = datetime.now().month
@@ -545,8 +694,8 @@ async def add_expense_finish(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     cursor.execute("""
         SELECT amount FROM limits 
-        WHERE category_id = ? AND month = ? AND year = ?
-    """, (cat_id, current_month, current_year))
+        WHERE category_id = ? AND month = ? AND year = ? AND user_id = ?
+    """, (cat_id, current_month, current_year, user_id))
 
     limit_data = cursor.fetchone()
     limit_amount = limit_data[0] if limit_data else 0
@@ -554,8 +703,8 @@ async def add_expense_finish(update: Update, context: ContextTypes.DEFAULT_TYPE)
     # Получаем сумму расходов по категории за текущий месяц
     cursor.execute("""
         SELECT SUM(amount) FROM expenses 
-        WHERE category_id = ? AND strftime('%m', date) = ? AND strftime('%Y', date) = ?
-    """, (cat_id, f"{current_month:02d}", str(current_year)))
+        WHERE category_id = ? AND strftime('%m', date) = ? AND strftime('%Y', date) = ? AND user_id = ?
+    """, (cat_id, f"{current_month:02d}", str(current_year), user_id))
 
     spent_data = cursor.fetchone()
     spent_amount = spent_data[0] if spent_data[0] else 0
@@ -587,12 +736,13 @@ async def add_expense_finish(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def show_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
     current_month = datetime.now().month
     current_year = datetime.now().year
+    user_id = get_user_id(update)
 
     conn = sqlite3.connect('expenses.db')
     cursor = conn.cursor()
 
-    # Получаем все категории
-    cursor.execute("SELECT id, name FROM categories ORDER BY name")
+    # Получаем все категории пользователя
+    cursor.execute("SELECT id, name FROM categories WHERE user_id = ? ORDER BY name", (user_id,))
     categories = cursor.fetchall()
 
     if not categories:
@@ -608,8 +758,8 @@ async def show_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Получаем лимит
         cursor.execute("""
             SELECT amount FROM limits 
-            WHERE category_id = ? AND month = ? AND year = ?
-        """, (cat_id, current_month, current_year))
+            WHERE category_id = ? AND month = ? AND year = ? AND user_id = ?
+        """, (cat_id, current_month, current_year, user_id))
 
         limit_data = cursor.fetchone()
         limit_amount = limit_data[0] if limit_data else 0
@@ -618,8 +768,8 @@ async def show_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Получаем расходы
         cursor.execute("""
             SELECT SUM(amount) FROM expenses 
-            WHERE category_id = ? AND strftime('%m', date) = ? AND strftime('%Y', date) = ?
-        """, (cat_id, f"{current_month:02d}", str(current_year)))
+            WHERE category_id = ? AND strftime('%m', date) = ? AND strftime('%Y', date) = ? AND user_id = ?
+        """, (cat_id, f"{current_month:02d}", str(current_year), user_id))
 
         spent_data = cursor.fetchone()
         spent_amount = spent_data[0] if spent_data[0] else 0
